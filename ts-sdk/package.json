@@ -1,0 +1,11 @@
+{
+  "name": "ts-sdk",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "@polkadot/api": "^10.10.1",
+    "@polkadot/util": "^12.5.1",
+    "@zeitgeistpm/sdk": "^2.45.0"
+  }
+}
