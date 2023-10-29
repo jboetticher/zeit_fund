@@ -5,6 +5,15 @@ use sp_runtime::MultiAddress;
 
 /*
 
+Workflow:
+1. Manager creates the ZeitFund with an initial funding goal.
+2. Users add ZTG with fund() until the fund is complete, unlocking it for the manager.
+    2a. It is recommended that managers also fund, to lock their tokens as a trust mechanism.
+        Otherwise, there is nothing stopping the manager from dumping. By locking, their
+        liquidity is locked until liquidation of the fund.
+3. Manager can interact with markets.
+
+
 Zeit Fund should:
 - Give a single account the ability to use a smart contract to buy/redeem shares in ZTG
 - Force the single account to have at least X amount of ZTG to do anything
@@ -38,7 +47,9 @@ mod zeit_fund {
         /// from another account.
         allowances: Mapping<(AccountId, AccountId), Balance>,
         /// The amount of ZTG that the fund has received already.
-        funding_amount: Balance
+        funding_amount: Balance,
+        /// Locks the manager's shares so that they can't be transferred.
+        lock_manager_shares: bool
     }
 
     // region: Events & Errors
@@ -76,6 +87,7 @@ mod zeit_fund {
         OnlyManagerAllowed,
         MustBeFunded,
         FundingTooMuch,
+        ManagerSharesAreLocked,
     }
 
     /// The ERC-20 result type.
@@ -85,8 +97,8 @@ mod zeit_fund {
 
     impl ZeitFund {
         /// Constructor that initializes the `bool` value to the given `init_value`.
-        #[ink(constructor)]
-        pub fn new(manager: AccountId, total_shares: Balance) -> Self {
+        #[ink(constructor, payable)]
+        pub fn new(manager: AccountId, total_shares: Balance, lock_manager_shares: bool) -> Self {
             // Give the zero address itself the total supply, to be distributed later
             let mut balances = Mapping::default();
             balances.insert(AccountId::from([0; 32]), &total_shares);
@@ -96,7 +108,8 @@ mod zeit_fund {
                 total_supply: total_shares,
                 balances,
                 allowances: Default::default(),
-                funding_amount: 0
+                funding_amount: 0,
+                lock_manager_shares
             }
         }
 
@@ -235,6 +248,10 @@ mod zeit_fund {
                 return Err(Error::InsufficientBalance);
             }
 
+            if from == &self.manager && self.lock_manager_shares {
+                return Err(Error::ManagerSharesAreLocked);
+            }
+
             self.balances.insert(from, &(from_balance - value));
             let to_balance = self.balance_of_impl(to);
             self.balances.insert(to, &(to_balance + value));
@@ -248,6 +265,8 @@ mod zeit_fund {
 
         // endregion
 
+        // region: Funding
+
         #[ink(message, payable)]
         pub fn fund(&mut self) -> Result<()> {
             let v = self.env().transferred_value();
@@ -257,11 +276,30 @@ mod zeit_fund {
             }
 
             // Mint to user
-            self.transfer_from_to(&AccountId::from([0; 32]), &self.env().caller(), v);
+            self.transfer_from_to(&AccountId::from([0; 32]), &self.env().caller(), v)?;
             self.funding_amount += v;
 
             Ok(())
         }
+
+        #[ink(message)]
+        pub fn initial_funding_amount(&self) -> u128 {
+            self.funding_amount
+        }
+
+        pub fn is_funded(&self) -> bool {
+            self.funding_amount == self.total_supply
+        }
+
+        #[inline]
+        fn must_be_funded(&self) -> Result<()> {
+            if !self.is_funded() {
+                return Err(Error::MustBeFunded);
+            }
+            Ok(())
+        }
+
+        // endregion
 
         #[inline]
         fn only_manager(&self) -> Result<()> {
@@ -271,12 +309,9 @@ mod zeit_fund {
             Ok(())
         }
 
-        #[inline]
-        fn must_be_funded(&self) -> Result<()> {
-            if self.funding_amount != self.total_supply {
-                return Err(Error::MustBeFunded);
-            }
-            Ok(())
+        #[ink(message)]
+        pub fn manager_shares(&self) -> u128 {
+            self.balance_of(self.manager)
         }
     }
 
@@ -298,7 +333,7 @@ mod zeit_fund {
         fn funding_works() {
             let caller = AccountId::from([0x01; 32]);
             let total_shares = 1_000_000_000_000;
-            let mut contract = ZeitFund::new(caller, total_shares);
+            let mut contract = ZeitFund::new(caller, total_shares, true);
 
             assert_eq!(contract.balance_of(AccountId::from([0; 32])), total_shares);
 
@@ -315,6 +350,9 @@ mod zeit_fund {
             let balance = contract.balance_of(caller);
             assert_eq!(balance, total_shares);
 
+            // Assert that goal is reached
+            assert_eq!(contract.is_funded(), true);
+
             // Assert failure to transfer over
             ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
                 caller, 1,
@@ -322,6 +360,28 @@ mod zeit_fund {
             let res = ink::env::pay_with_call!(contract.fund(), 1);
             assert_eq!(res, Err(Error::FundingTooMuch));
 
+        }
+    
+        #[ink::test]
+        fn manager_token_lock_works() {
+            let manager = AccountId::from([0x01; 32]);
+            let total_shares = 1_000_000_000_000;
+            let mut contract = ZeitFund::new(manager, total_shares, true);
+
+            assert_eq!(contract.balance_of(AccountId::from([0; 32])), total_shares);
+
+            // Manager will fund with 50
+            let half_transfer = 500_000_000_000;
+            ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
+                manager, half_transfer,
+            );
+            ink::env::pay_with_call!(contract.fund(), half_transfer).unwrap();
+            assert_eq!(contract.balance_of(manager), half_transfer);
+            assert_eq!(contract.manager_shares(), half_transfer);
+
+            // Assert that the manager can't transfer
+            let res = contract.transfer(AccountId::from([0x08; 32]), half_transfer);
+            assert_eq!(res, Err(Error::ManagerSharesAreLocked));
         }
     }
 }
