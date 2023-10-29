@@ -301,6 +301,8 @@ mod zeit_fund {
 
         // endregion
 
+        // region
+
         #[inline]
         fn only_manager(&self) -> Result<()> {
             if self.env().caller() != self.manager {
@@ -312,6 +314,11 @@ mod zeit_fund {
         #[ink(message)]
         pub fn manager_shares(&self) -> u128 {
             self.balance_of(self.manager)
+        }
+
+        #[ink(message)]
+        pub fn manager_is_locked(&self) -> bool {
+            self.lock_manager_shares
         }
     }
 
@@ -369,6 +376,7 @@ mod zeit_fund {
             let mut contract = ZeitFund::new(manager, total_shares, true);
 
             assert_eq!(contract.balance_of(AccountId::from([0; 32])), total_shares);
+            assert_eq!(contract.manager_is_locked(), true);
 
             // Manager will fund with 50
             let half_transfer = 500_000_000_000;
