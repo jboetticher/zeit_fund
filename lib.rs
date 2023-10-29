@@ -37,6 +37,8 @@ mod zeit_fund {
         /// Mapping of the token amount which an account is allowed to withdraw
         /// from another account.
         allowances: Mapping<(AccountId, AccountId), Balance>,
+        /// The amount of ZTG that the fund has received already.
+        funding_amount: Balance
     }
 
     // region: Events & Errors
@@ -72,6 +74,8 @@ mod zeit_fund {
         InsufficientAllowance,
         /// Returned if only the manager is allowed to call the function.
         OnlyManagerAllowed,
+        MustBeFunded,
+        FundingTooMuch,
     }
 
     /// The ERC-20 result type.
@@ -79,15 +83,10 @@ mod zeit_fund {
 
     // endregion
 
-    // TODO: separate impl of ERC20 trait
-
     impl ZeitFund {
-        // TODO: turn into ERC-20 also
-
         /// Constructor that initializes the `bool` value to the given `init_value`.
         #[ink(constructor)]
         pub fn new(manager: AccountId, total_shares: Balance) -> Self {
-
             // Give the zero address itself the total supply, to be distributed later
             let mut balances = Mapping::default();
             balances.insert(AccountId::from([0; 32]), &total_shares);
@@ -97,10 +96,11 @@ mod zeit_fund {
                 total_supply: total_shares,
                 balances,
                 allowances: Default::default(),
+                funding_amount: 0
             }
-
         }
 
+        // TODO: separate impl of ERC20 trait
         // region: ERC-20
 
         /// Returns the total token supply.
@@ -248,12 +248,33 @@ mod zeit_fund {
 
         // endregion
 
+        #[ink(message, payable)]
+        pub fn fund(&mut self) -> Result<()> {
+            let v = self.env().transferred_value();
+            // TODO: potential DOS here
+            if v + self.funding_amount > self.total_supply {
+                return Err(Error::FundingTooMuch);
+            }
 
+            // Mint to user
+            self.transfer_from_to(&AccountId::from([0; 32]), &self.env().caller(), v);
+            self.funding_amount += v;
+
+            Ok(())
+        }
 
         #[inline]
         fn only_manager(&self) -> Result<()> {
             if self.env().caller() != self.manager {
-                return Err(Error::OnlyManagerAllowed)
+                return Err(Error::OnlyManagerAllowed);
+            }
+            Ok(())
+        }
+
+        #[inline]
+        fn must_be_funded(&self) -> Result<()> {
+            if self.funding_amount != self.total_supply {
+                return Err(Error::MustBeFunded);
             }
             Ok(())
         }
@@ -268,6 +289,40 @@ mod zeit_fund {
         // use super::*;
 
         // TODO: write tests if you have time
+
+        use ink::primitives::AccountId;
+        use super::ZeitFund;
+        use crate::zeit_fund::{Environment, Error};
+
+        #[ink::test]
+        fn funding_works() {
+            let caller = AccountId::from([0x01; 32]);
+            let total_shares = 1_000_000_000_000;
+            let mut contract = ZeitFund::new(caller, total_shares);
+
+            assert_eq!(contract.balance_of(AccountId::from([0; 32])), total_shares);
+
+            let half_transfer = 500_000_000_000;
+            ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
+                caller, half_transfer,
+            );
+
+            // Assert transfers
+            ink::env::pay_with_call!(contract.fund(), half_transfer).unwrap();
+            let balance = contract.balance_of(caller);
+            assert_eq!(balance, half_transfer);
+            ink::env::pay_with_call!(contract.fund(), half_transfer).unwrap();
+            let balance = contract.balance_of(caller);
+            assert_eq!(balance, total_shares);
+
+            // Assert failure to transfer over
+            ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
+                caller, 1,
+            );
+            let res = ink::env::pay_with_call!(contract.fund(), 1);
+            assert_eq!(res, Err(Error::FundingTooMuch));
+
+        }
     }
 }
 
@@ -282,6 +337,8 @@ enum RuntimeCall {
     /// [See here for more.](https://substrate.stackexchange.com/questions/778/how-to-get-pallet-index-u8-of-a-pallet-in-runtime)
     #[codec(index = 40)]
     AssetManager(AssetManagerCall),
+    #[codec(index = 56)]
+    Swaps(SwapsCall),
     #[codec(index = 57)]
     PredictionMarkets(PredictionMarketsCall),
 }
@@ -299,6 +356,33 @@ enum AssetManagerCall {
 }
 
 #[derive(scale::Encode, scale::Decode)]
+enum SwapsCall {
+    // https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Fbsr.zeitgeist.pm#/extrinsics/decode/0x380981040402286bee00b102000000000000000000000000000001000100cdbe7b00000000000000000000000000
+    #[codec(index = 9)]
+    SwapExactAmountIn {
+        #[codec(compact)]
+        pool_id: u128,
+        asset_in: ZeitgeistAsset,
+        #[codec(compact)]
+        asset_amount_in: u128,
+        asset_out: ZeitgeistAsset,
+        min_asset_amount_out: Option<u128>,
+        max_price: Option<u128>,
+    },
+    #[codec(index = 10)]
+    SwapExactAmountOut {
+        #[codec(compact)]
+        pool_id: u128,
+        asset_in: ZeitgeistAsset,
+        max_asset_amount_in: Option<u128>,
+        asset_out: ZeitgeistAsset,
+        #[codec(compact)]
+        asset_amount_out: u128,
+        max_price: Option<u128>,
+    },
+}
+
+#[derive(scale::Encode, scale::Decode)]
 enum PredictionMarketsCall {
     #[codec(index = 5)]
     BuyCompleteSet {
@@ -310,7 +394,7 @@ enum PredictionMarketsCall {
     #[codec(index = 12)]
     RedeemShares {
         #[codec(compact)]
-        market_id: u128
+        market_id: u128,
     },
     #[codec(index = 15)]
     SellCompleteSet {
@@ -318,7 +402,7 @@ enum PredictionMarketsCall {
         market_id: u128,
         #[codec(compact)]
         amount: u128,
-    }
+    },
 }
 
 #[derive(scale::Encode, scale::Decode, Clone, PartialEq)]
