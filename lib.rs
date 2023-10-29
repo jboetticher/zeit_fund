@@ -343,6 +343,13 @@ mod zeit_fund {
 
         // endregion
 
+        // regions: Dividends
+
+        // TODO: upon instantiation, instantiate a new smart contract that acts as a wallet for dividends
+        // TODO: edit the ERC-20 implementation to use snapshots
+
+        // endregion
+
         #[inline]
         fn only_manager(&self) -> Result<()> {
             if self.env().caller() != self.manager {
