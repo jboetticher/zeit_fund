@@ -17,9 +17,6 @@ Workflow:
 Zeit Fund should:
 - Give a single account the ability to use a smart contract to buy/redeem shares in ZTG
 - Force the single account to have at least X amount of ZTG to do anything
-- Allow users to buy shares of the smart contract
-- Allow users to redeem shares of the smart contract
-
 
 NOTE:
 No dynamic insert of funds. There is a period where funds are added and afterwards no more.
@@ -30,7 +27,12 @@ Users that wish to exit can only resell the ERC20 token, not liquidate for the i
 
 #[ink::contract]
 mod zeit_fund {
+    use crate::{
+        RuntimeCall,
+        SwapsCall, PredictionMarketsCall
+    };
     use ink::storage::Mapping;
+    use ink::env::Error as EnvError;
 
     /// Defines the storage of your contract.
     /// Add new fields to the below struct in order
@@ -49,7 +51,7 @@ mod zeit_fund {
         /// The amount of ZTG that the fund has received already.
         funding_amount: Balance,
         /// Locks the manager's shares so that they can't be transferred.
-        lock_manager_shares: bool
+        lock_manager_shares: bool,
     }
 
     // region: Events & Errors
@@ -88,6 +90,16 @@ mod zeit_fund {
         MustBeFunded,
         FundingTooMuch,
         ManagerSharesAreLocked,
+        CallRuntimeFailed
+    }
+    
+    impl From<EnvError> for Error {
+        fn from(e: EnvError) -> Self {
+            match e {
+                EnvError::CallRuntimeFailed => Error::CallRuntimeFailed,
+                _ => panic!("Unexpected error from `pallet-contracts`."),
+            }
+        }
     }
 
     /// The ERC-20 result type.
@@ -109,7 +121,7 @@ mod zeit_fund {
                 balances,
                 allowances: Default::default(),
                 funding_amount: 0,
-                lock_manager_shares
+                lock_manager_shares,
             }
         }
 
@@ -301,7 +313,35 @@ mod zeit_fund {
 
         // endregion
 
-        // region
+        // region: Fund Management
+
+        /// Allows the manager to send a call into the Swaps pallet.
+        #[ink(message)]
+        pub fn swap_call(&mut self, call: SwapsCall) -> Result<()> {
+            self.only_manager()?;
+            self.must_be_funded()?;
+
+            self.env()
+                .call_runtime(&RuntimeCall::Swaps(call))
+                .map_err(Into::<Error>::into)?;
+
+            Ok(())
+        }
+
+        /// Allows the manager to send a call into the PredictionMarkets pallet.
+        #[ink(message)]
+        pub fn prediction_market_call(&mut self, call: PredictionMarketsCall) -> Result<()> {
+            self.only_manager()?;
+            self.must_be_funded()?;
+
+            self.env()
+                .call_runtime(&RuntimeCall::PredictionMarkets(call))
+                .map_err(Into::<Error>::into)?;
+
+            Ok(())
+        }
+
+        // endregion
 
         #[inline]
         fn only_manager(&self) -> Result<()> {
@@ -332,9 +372,9 @@ mod zeit_fund {
 
         // TODO: write tests if you have time
 
-        use ink::primitives::AccountId;
         use super::ZeitFund;
         use crate::zeit_fund::{Environment, Error};
+        use ink::primitives::AccountId;
 
         #[ink::test]
         fn funding_works() {
@@ -346,7 +386,8 @@ mod zeit_fund {
 
             let half_transfer = 500_000_000_000;
             ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
-                caller, half_transfer,
+                caller,
+                half_transfer,
             );
 
             // Assert transfers
@@ -361,14 +402,11 @@ mod zeit_fund {
             assert_eq!(contract.is_funded(), true);
 
             // Assert failure to transfer over
-            ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
-                caller, 1,
-            );
+            ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(caller, 1);
             let res = ink::env::pay_with_call!(contract.fund(), 1);
             assert_eq!(res, Err(Error::FundingTooMuch));
-
         }
-    
+
         #[ink::test]
         fn manager_token_lock_works() {
             let manager = AccountId::from([0x01; 32]);
@@ -381,7 +419,8 @@ mod zeit_fund {
             // Manager will fund with 50
             let half_transfer = 500_000_000_000;
             ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
-                manager, half_transfer,
+                manager,
+                half_transfer,
             );
             ink::env::pay_with_call!(contract.fund(), half_transfer).unwrap();
             assert_eq!(contract.balance_of(manager), half_transfer);
@@ -395,7 +434,7 @@ mod zeit_fund {
 }
 
 #[derive(scale::Encode, scale::Decode)]
-enum RuntimeCall {
+pub enum RuntimeCall {
     /// This index can be found by investigating runtime configuration. You can check the
     /// pallet order inside `construct_runtime!` block and read the position of your
     /// pallet (0-based).
@@ -412,7 +451,7 @@ enum RuntimeCall {
 }
 
 #[derive(scale::Encode, scale::Decode)]
-enum AssetManagerCall {
+pub enum AssetManagerCall {
     // https://github.com/open-web3-stack/open-runtime-module-library/blob/22a4f7b7d1066c1a138222f4546d527d32aa4047/currencies/src/lib.rs#L129-L131C19
     #[codec(index = 0)]
     Transfer {
@@ -424,7 +463,8 @@ enum AssetManagerCall {
 }
 
 #[derive(scale::Encode, scale::Decode)]
-enum SwapsCall {
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub enum SwapsCall {
     // https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Fbsr.zeitgeist.pm#/extrinsics/decode/0x380981040402286bee00b102000000000000000000000000000001000100cdbe7b00000000000000000000000000
     #[codec(index = 9)]
     SwapExactAmountIn {
@@ -451,7 +491,8 @@ enum SwapsCall {
 }
 
 #[derive(scale::Encode, scale::Decode)]
-enum PredictionMarketsCall {
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub enum PredictionMarketsCall {
     #[codec(index = 5)]
     BuyCompleteSet {
         #[codec(compact)]
@@ -474,11 +515,14 @@ enum PredictionMarketsCall {
 }
 
 #[derive(scale::Encode, scale::Decode, Clone, PartialEq)]
-enum ZeitgeistAsset {
-    CategoricalOutcome, //(MI, CategoryIndex),
-    ScalarOutcome,      //(MI, ScalarPosition),
+#[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+pub enum ZeitgeistAsset {
+    CategoricalOutcome(u128, u16),
+    ScalarOutcome,      //(u128, ScalarPosition),
     CombinatorialOutcome,
     PoolShare, //(SerdeWrapper<PoolId>),
     Ztg,       // default
     ForeignAsset(u32),
 }
+
+// ink::storage::traits::StorageLayout,
