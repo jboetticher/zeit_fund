@@ -25,8 +25,13 @@ Users that wish to exit can only resell the ERC20 token, not liquidate for the i
 
 */
 
+// Export DividendWallet so that it can be used in zeit_fund
+pub use self::dividend_wallet::DividendWalletRef;
+
 #[ink::contract]
 mod dividend_wallet {
+    // use core::fmt::{Debug, Formatter};
+
     use crate::{AssetManagerCall, RuntimeCall};
 
     /// Defines the storage of your contract.
@@ -38,23 +43,34 @@ mod dividend_wallet {
         fund: AccountId,
     }
 
+    // impl Debug for DividendWallet {
+    //     fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
+
+    //     }
+    // }
+
     impl DividendWallet {
         /// Constructor that initializes the `bool` value to the given `init_value`.
         #[ink(constructor, payable)]
         pub fn new() -> Self {
             Self {
-                fund: AccountId::from([0; 32]),
+                fund: Self::env().caller(),
             }
         }
 
-        #[ink(message)]
-        pub fn claim_wallet(&mut self) -> bool {
-            if self.fund != AccountId::from([0; 32]) {
-                self.fund = self.env().caller();
-                return true;
-            }
+        // #[ink(message)]
+        // pub fn claim_wallet(&mut self) -> bool {
+        //     if self.fund != AccountId::from([0; 32]) {
+        //         self.fund = self.env().caller();
+        //         return true;
+        //     }
 
-            false
+        //     false
+        // }
+
+        #[ink(message)]
+        pub fn fund(&self) -> AccountId {
+            self.fund
         }
 
         #[ink(message)]
@@ -69,7 +85,7 @@ mod dividend_wallet {
                     .call_runtime(&RuntimeCall::AssetManager(AssetManagerCall::Transfer {
                         dest: dest.into(),
                         currency_id: crate::ZeitgeistAsset::Ztg,
-                        amount
+                        amount,
                     }));
 
             !res.is_err()

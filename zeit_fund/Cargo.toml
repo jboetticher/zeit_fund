@@ -6,11 +6,12 @@ edition = "2021"
 
 [dependencies]
 ink = { version = "4.3.0", default-features = false, features = ["call-runtime"] }
-
 scale = { package = "parity-scale-codec", version = "3", default-features = false, features = ["derive"] }
 scale-info = { version = "2.6", default-features = false, features = ["derive"], optional = true }
 sp-io = { version = "23.0.0", default-features = false, features = ["disable_panic_handler", "disable_oom", "disable_allocator"] }
 sp-runtime = { version = "24.0.0", default-features = false }
+
+dividend_wallet = { path = "../dividend_wallet", default-features = false, features = ["ink-as-dependency"] }
 
 [dev-dependencies]
 ink_e2e = { version = "4.3" }
@@ -26,6 +27,7 @@ std = [
     "scale-info/std",
     "sp-runtime/std",
     "sp-io/std",
+    "dividend_wallet/std"
 ]
 ink-as-dependency = []
 e2e-tests = []

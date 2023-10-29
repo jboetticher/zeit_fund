@@ -28,8 +28,12 @@ Users that wish to exit can only resell the ERC20 token, not liquidate for the i
 #[ink::contract]
 mod zeit_fund {
     use crate::{AssetManagerCall, PredictionMarketsCall, RuntimeCall, SwapsCall, ZeitgeistAsset};
+    use dividend_wallet::DividendWalletRef;
     use ink::env::Error as EnvError;
+    use ink::env::call::FromAccountId;
+    use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
+    use ink::ToAccountId;
 
     /// Defines the storage of your contract.
     /// Add new fields to the below struct in order
@@ -51,7 +55,7 @@ mod zeit_fund {
         lock_manager_shares: bool,
         /// The wallet that dividends are issued to so that they can no longer be used
         /// by the manager.
-        dividend_wallet: AccountId,
+        dividend_wallet: DividendWalletRef,
         /// An array of dividends being issued at certain blocks.
         dividends: Vec<(BlockNumber, Balance)>,
         /// The last time that a user claimed a dividend.
@@ -95,6 +99,7 @@ mod zeit_fund {
         FundingTooMuch,
         ManagerSharesAreLocked,
         CallRuntimeFailed,
+        DividendDistributionError,
     }
 
     impl From<EnvError> for Error {
@@ -113,18 +118,24 @@ mod zeit_fund {
 
     impl ZeitFund {
         /// Constructor that initializes the `bool` value to the given `init_value`.
-        #[ink(constructor, payable)]
+        #[ink(constructor)]
         pub fn new(
             manager: AccountId,
             total_shares: Balance,
             lock_manager_shares: bool,
-            dividend_wallet: AccountId,
+            dividend_wallet_hash: Hash,
         ) -> Self {
             // Give the zero address itself the total supply, to be distributed later
             let mut balances = Mapping::default();
             balances.insert(AccountId::from([0; 32]), &total_shares);
 
-            // TODO: claim dividend wallet, panic if Err
+            // Constructs wallet
+            let dividend_wallet = DividendWalletRef::new()
+                .code_hash(dividend_wallet_hash)
+                .endowment(0)
+                .salt_bytes([0xDE, 0xAD, 0xBE, 0xEF])
+                .instantiate();
+            // TODO: edit so that dividend wallet is constructed, not claimed
 
             Self {
                 manager,
@@ -134,6 +145,34 @@ mod zeit_fund {
                 funding_amount: 0,
                 lock_manager_shares,
                 dividend_wallet,
+                dividends: Vec::new(),
+                last_claimed_dividend: Default::default(),
+            }
+        }
+
+        /// Constructor that takes in a dividend wallet instead of creating its own.
+        /// 
+        /// The dividend wallet must implement the `distribute(dest: AccountId, amount: u128)` 
+        /// function.
+        #[ink(constructor)]
+        pub fn no_instantiation(
+            manager: AccountId,
+            total_shares: Balance,
+            lock_manager_shares: bool,
+            dividend_wallet: AccountId,
+        ) -> Self {
+            // Give the zero address itself the total supply, to be distributed later
+            let mut balances = Mapping::default();
+            balances.insert(AccountId::from([0; 32]), &total_shares);
+
+            Self {
+                manager,
+                total_supply: total_shares,
+                balances,
+                allowances: Default::default(),
+                funding_amount: 0,
+                lock_manager_shares,
+                dividend_wallet: DividendWalletRef::from_account_id(dividend_wallet),
                 dividends: Vec::new(),
                 last_claimed_dividend: Default::default(),
             }
@@ -360,17 +399,18 @@ mod zeit_fund {
 
         // endregion
 
-        // regions: Dividends
+        // region: Dividends
 
+        /// Allows the manager to issue a dividend of a specific amount.
         #[ink(message)]
-        pub fn issue_dividend(&mut self, amount: u128) -> Result<()> {
+        pub fn issue_dividend(&mut self, amount: Balance) -> Result<()> {
             self.only_manager()?;
             self.must_be_funded()?;
 
             // Send to dividend wallet
             self.env()
                 .call_runtime(&RuntimeCall::AssetManager(AssetManagerCall::Transfer {
-                    dest: self.dividend_wallet.into(),
+                    dest: self.dividend_wallet.to_account_id().into(),
                     currency_id: ZeitgeistAsset::Ztg,
                     amount,
                 }))
@@ -382,13 +422,14 @@ mod zeit_fund {
             Ok(())
         }
 
+        /// Claims a dividend for the caller.
         #[ink(message)]
-        pub fn claim(&mut self) -> Result<()> {
+        pub fn claim(&mut self) -> Result<Balance> {
             self.claim_dividend(self.env().caller())
         }
 
         /// Claims a dividend for a specific user
-        fn claim_dividend(&mut self, caller: AccountId) -> Result<()> {
+        fn claim_dividend(&mut self, caller: AccountId) -> Result<Balance> {
             // Calculate amount of dividend since last claim
             let dividend = self.calc_dividend(caller);
 
@@ -396,16 +437,20 @@ mod zeit_fund {
             self.last_claimed_dividend
                 .insert(caller, &self.env().block_number());
 
-            // TODO: claim dividend from dividend wallet
+            // Claim dividend from dividend wallet
+            let res = self.dividend_wallet.distribute(caller, dividend);
+            if !res {
+                return Err(Error::DividendDistributionError);
+            }
 
-            Ok(())
+            Ok(dividend)
         }
 
         #[ink(message)]
         pub fn calc_dividend(&self, user: AccountId) -> Balance {
             let last_block = self.last_claimed_dividend.get(user).unwrap_or(0);
             let user_balance = self.balance_of(user);
-            
+
             // Return 0 if user doesn't have any shares
             if user_balance == 0 {
                 return 0;
@@ -419,13 +464,13 @@ mod zeit_fund {
                     oldest_unclaimed_dividend = i;
                     break;
                 }
-            };
+            }
             if oldest_unclaimed_dividend > self.dividends.len() {
                 // If the oldest unclaimed dividend is too high, then there are no other dividends
                 return 0;
             }
 
-            // Find the sum of the dividends to give out since the user last received money 
+            // Find the sum of the dividends to give out since the user last received money
             // TODO: implement binary search to make more efficient
             let mut sum = 0;
             for i in oldest_unclaimed_dividend..self.dividends.len() {
@@ -438,6 +483,20 @@ mod zeit_fund {
             let dividend = (sum * percentage) / buffer;
 
             dividend
+        }
+
+        /// The AccountId of the dividend wallet that this fund uses.
+        #[ink(message)]
+        pub fn dividend_wallet(&self) -> AccountId {
+            self.dividend_wallet.to_account_id()
+        }
+
+        /// The AccountId of the fund registered by the dividend wallet that this fund uses.
+        /// It should be the same as this smart contract. Otherwise, dividends may be handled
+        /// by a third party smart contract or address.
+        #[ink(message)]
+        pub fn dividend_wallet_fund(&self) -> AccountId {
+            self.dividend_wallet.fund()
         }
 
         // endregion
@@ -475,11 +534,16 @@ mod zeit_fund {
         use crate::zeit_fund::{Environment, Error};
         use ink::primitives::AccountId;
 
+        /// Creates a fund without a dividend wallet (for testing purposes).
+        fn create_fund_no_wallet(manager: AccountId, total_shares: u128, lock_manager_shares: bool) -> ZeitFund {
+            ZeitFund::no_instantiation(manager, total_shares, lock_manager_shares, manager)
+        }
+
         #[ink::test]
         fn funding_works() {
             let caller = AccountId::from([0x01; 32]);
             let total_shares = 1_000_000_000_000;
-            let mut contract = ZeitFund::new(caller, total_shares, true, caller);
+            let mut contract = create_fund_no_wallet(caller, total_shares, true);
 
             assert_eq!(contract.balance_of(AccountId::from([0; 32])), total_shares);
 
@@ -510,7 +574,7 @@ mod zeit_fund {
         fn manager_token_lock_works() {
             let manager = AccountId::from([0x01; 32]);
             let total_shares = 1_000_000_000_000;
-            let mut contract = ZeitFund::new(manager, total_shares, true, manager);
+            let mut contract = create_fund_no_wallet(manager, total_shares, true);
 
             assert_eq!(contract.balance_of(AccountId::from([0; 32])), total_shares);
             assert_eq!(contract.manager_is_locked(), true);
