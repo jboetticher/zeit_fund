@@ -20,14 +20,21 @@ No dynamic insert of funds. There is a period where funds are added and afterwar
 Users cannot force liquidation.
 Users that wish to exit can only resell the ERC20 token, not liquidate for the individual market positions.
 
+NOTE:
+self.env().block_number() is broken for some reason. Fortunately self.env().block_timestamp() works.
+Hence, we are using timestamp instead of block_number. Be sure to change this back if the issue is
+ever fixed.
+
+TODO: check to see if env().block_number() works on substrate contracts node & make an issue
+
 */
 
 #[ink::contract]
 mod zeit_fund {
     use crate::{AssetManagerCall, PredictionMarketsCall, RuntimeCall, SwapsCall, ZeitgeistAsset};
     use dividend_wallet::DividendWalletRef;
-    use ink::env::Error as EnvError;
     use ink::env::call::FromAccountId;
+    use ink::env::Error as EnvError;
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use ink::ToAccountId;
@@ -51,9 +58,9 @@ mod zeit_fund {
         /// by the manager.
         dividend_wallet: DividendWalletRef,
         /// An array of dividends being issued at certain blocks.
-        dividends: Vec<(BlockNumber, Balance)>,
+        dividends: Vec<(Timestamp, Balance)>,
         /// The last time that a user claimed a dividend.
-        last_claimed_dividend: Mapping<AccountId, BlockNumber>,
+        last_claimed_dividend: Mapping<AccountId, Timestamp>,
     }
 
     // region: Events & Errors
@@ -77,6 +84,21 @@ mod zeit_fund {
         #[ink(topic)]
         spender: AccountId,
         value: Balance,
+    }
+
+    /// Event emitted when the manager issues a dividend.
+    #[ink(event)]
+    pub struct DividendIssued {
+        amount: Balance,
+        timestamp: Timestamp,
+    }
+
+    #[ink(event)]
+    pub struct DividendClaimed {
+        #[ink(topic)]
+        user: AccountId,
+        amount: Balance,
+        timestamp: Timestamp,
     }
 
     /// The ERC-20 error types.
@@ -144,8 +166,8 @@ mod zeit_fund {
         }
 
         /// Constructor that takes in a dividend wallet instead of creating its own.
-        /// 
-        /// The dividend wallet must implement the `distribute(dest: AccountId, amount: u128)` 
+        ///
+        /// The dividend wallet must implement the `distribute(dest: AccountId, amount: u128)`
         /// function.
         #[ink(constructor)]
         pub fn no_instantiation(
@@ -311,7 +333,7 @@ mod zeit_fund {
             }
 
             // Ensure that dividend is claimed by the from
-            self.claim_dividend(*from)?;
+            self.claim_dividend(from.clone())?;
 
             self.balances.insert(from, &(from_balance - value));
             let to_balance = self.balance_of_impl(to);
@@ -328,6 +350,7 @@ mod zeit_fund {
 
         // region: Funding
 
+        /// Allows users to send ZTG to fund the contract in return for shares.
         #[ink(message, payable)]
         pub fn fund(&mut self) -> Result<()> {
             let v = self.env().transferred_value();
@@ -343,11 +366,14 @@ mod zeit_fund {
             Ok(())
         }
 
+        /// The initial funding amount in ZTG required for the fund to start.
         #[ink(message)]
         pub fn initial_funding_amount(&self) -> u128 {
             self.funding_amount
         }
 
+        /// True if the contract has been completely funded, false if otherwise.
+        #[ink(message)]
         pub fn is_funded(&self) -> bool {
             self.funding_amount == self.total_supply
         }
@@ -410,7 +436,11 @@ mod zeit_fund {
                 .map_err(Into::<Error>::into)?;
 
             // Add to dividend list
-            self.dividends.push((self.env().block_number(), amount));
+            let timestamp = self.env().block_timestamp();
+            self.dividends.push((timestamp, amount));
+
+            // Emit dividend event
+            self.env().emit_event(DividendIssued { amount, timestamp });
 
             Ok(())
         }
@@ -427,18 +457,27 @@ mod zeit_fund {
             let dividend = self.calc_dividend(caller);
 
             // Sets last claimed dividend
-            self.last_claimed_dividend
-                .insert(caller, &self.env().block_number());
+            let block_timestamp = self.env().block_timestamp();
+            self.last_claimed_dividend.insert(caller, &block_timestamp);
 
             // Claim dividend from dividend wallet
-            let res = self.dividend_wallet.distribute(caller, dividend);
-            if !res {
-                return Err(Error::DividendDistributionError);
+            if dividend > 0 {
+                let res = self.dividend_wallet.distribute(caller, dividend);
+                if !res {
+                    return Err(Error::DividendDistributionError);
+                }
+                
+                self.env().emit_event(DividendClaimed {
+                    user: caller,
+                    amount: dividend,
+                    timestamp: block_timestamp,
+                });
             }
 
             Ok(dividend)
         }
 
+        /// The dividend that a specific AccountId is currently entitled to.
         #[ink(message)]
         pub fn calc_dividend(&self, user: AccountId) -> Balance {
             let last_block = self.last_claimed_dividend.get(user).unwrap_or(0);
@@ -478,6 +517,11 @@ mod zeit_fund {
             dividend
         }
 
+        #[ink(message)]
+        pub fn last_dividend_claim(&self, user: AccountId) -> Timestamp {
+            self.last_claimed_dividend.get(user).unwrap_or(0)
+        }
+
         /// The AccountId of the dividend wallet that this fund uses.
         #[ink(message)]
         pub fn dividend_wallet(&self) -> AccountId {
@@ -502,11 +546,14 @@ mod zeit_fund {
             Ok(())
         }
 
+        /// The shares that the manager owns. Should be high so that they have some skin in
+        /// the game!
         #[ink(message)]
         pub fn manager_shares(&self) -> u128 {
             self.balance_of(self.manager)
         }
 
+        /// If true, the manager cannot transfer their shares (and thus cannot easily rug).
         #[ink(message)]
         pub fn manager_is_locked(&self) -> bool {
             self.lock_manager_shares
@@ -528,8 +575,20 @@ mod zeit_fund {
         use ink::primitives::AccountId;
 
         /// Creates a fund without a dividend wallet (for testing purposes).
-        fn create_fund_no_wallet(manager: AccountId, total_shares: u128, lock_manager_shares: bool) -> ZeitFund {
+        fn create_fund_no_wallet(
+            manager: AccountId,
+            total_shares: u128,
+            lock_manager_shares: bool,
+        ) -> ZeitFund {
             ZeitFund::no_instantiation(manager, total_shares, lock_manager_shares, manager)
+        }
+
+        /// Sends a lot of ZTG/DEV to a wallet.
+        fn megafund_wallet(wallet: AccountId) {
+            ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
+                wallet,
+                100_000_000_000_000_000,
+            );
         }
 
         #[ink::test]
@@ -541,10 +600,7 @@ mod zeit_fund {
             assert_eq!(contract.balance_of(AccountId::from([0; 32])), total_shares);
 
             let half_transfer = 500_000_000_000;
-            ink::env::test::set_account_balance::<ink::env::DefaultEnvironment>(
-                caller,
-                half_transfer,
-            );
+            megafund_wallet(caller);
 
             // Assert transfers
             ink::env::pay_with_call!(contract.fund(), half_transfer).unwrap();
@@ -585,6 +641,57 @@ mod zeit_fund {
             // Assert that the manager can't transfer
             let res = contract.transfer(AccountId::from([0x08; 32]), half_transfer);
             assert_eq!(res, Err(Error::ManagerSharesAreLocked));
+        }
+
+        #[ink::test]
+        fn token_based_dividend_calculation_works() {
+            let manager = AccountId::from([0x01; 32]);
+            let user = AccountId::from([0x04; 32]);
+            let total_shares = 100_000_000_000;
+            let mut fund = create_fund_no_wallet(manager, total_shares, false);
+
+            // Manager will fund with 1/4 of the shares
+            let quarter_transfer = total_shares / 4;
+            megafund_wallet(manager);
+            ink::env::pay_with_call!(fund.fund(), quarter_transfer).unwrap();
+            assert_eq!(fund.balance_of(manager), quarter_transfer);
+            assert_eq!(fund.manager_shares(), quarter_transfer);
+
+            // Another account will fund with 3/4 of the shares
+            ink::env::test::set_caller::<Environment>(user);
+            megafund_wallet(user);
+            ink::env::pay_with_call!(fund.fund(), quarter_transfer * 3).unwrap();
+            assert_eq!(fund.balance_of(user), quarter_transfer * 3);
+            assert!(fund.is_funded());
+
+            // NOTE:    Cannot do fund.issue_dividend() since it calls runtime. Instead,
+            //          we manually add to the dividend.
+
+            // "Issue" dividend by cheating
+            let dividend_amount = total_shares / 2;
+            fund.dividends.push((100_000_000, dividend_amount));
+
+            // Claim values should be proportional to the tokens
+            let manager_dividend = fund.calc_dividend(manager);
+            assert_eq!(manager_dividend, dividend_amount / 4);
+            let user_dividend = fund.calc_dividend(user);
+            assert_eq!(user_dividend, dividend_amount / 4 * 3);
+
+            // "Issue" second dividend by cheating
+            let second_dividend_amount = total_shares / 4;
+            fund.dividends.push((100_000_000, second_dividend_amount));
+
+            // Claim values should sum up
+            let manager_dividend = fund.calc_dividend(manager);
+            assert_eq!(
+                manager_dividend,
+                (dividend_amount + second_dividend_amount) / 4
+            );
+            let user_dividend = fund.calc_dividend(user);
+            assert_eq!(
+                user_dividend,
+                (dividend_amount + second_dividend_amount) / 4 * 3
+            );
         }
     }
 }

@@ -3,28 +3,6 @@
 use ink::primitives::AccountId;
 use sp_runtime::MultiAddress;
 
-/*
-
-Workflow:
-1. Manager creates the ZeitFund with an initial funding goal.
-2. Users add ZTG with fund() until the fund is complete, unlocking it for the manager.
-    2a. It is recommended that managers also fund, to lock their tokens as a trust mechanism.
-        Otherwise, there is nothing stopping the manager from dumping. By locking, their
-        liquidity is locked until liquidation of the fund.
-3. Manager can interact with markets.
-
-
-Zeit Fund should:
-- Give a single account the ability to use a smart contract to buy/redeem shares in ZTG
-- Force the single account to have at least X amount of ZTG to do anything
-
-NOTE:
-No dynamic insert of funds. There is a period where funds are added and afterwards no more.
-Users cannot force liquidation.
-Users that wish to exit can only resell the ERC20 token, not liquidate for the individual market positions.
-
-*/
-
 // Export DividendWallet so that it can be used in zeit_fund
 pub use self::dividend_wallet::DividendWalletRef;
 
@@ -43,12 +21,6 @@ mod dividend_wallet {
         fund: AccountId,
     }
 
-    // impl Debug for DividendWallet {
-    //     fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
-
-    //     }
-    // }
-
     impl DividendWallet {
         /// Constructor that initializes the `bool` value to the given `init_value`.
         #[ink(constructor, payable)]
@@ -57,16 +29,6 @@ mod dividend_wallet {
                 fund: Self::env().caller(),
             }
         }
-
-        // #[ink(message)]
-        // pub fn claim_wallet(&mut self) -> bool {
-        //     if self.fund != AccountId::from([0; 32]) {
-        //         self.fund = self.env().caller();
-        //         return true;
-        //     }
-
-        //     false
-        // }
 
         #[ink(message)]
         pub fn fund(&self) -> AccountId {
@@ -97,15 +59,20 @@ mod dividend_wallet {
     /// The below code is technically just normal Rust code.
     #[cfg(test)]
     mod tests {
-        // Imports all the definitions from the outer scope so we can use them here.
-        // use super::*;
-
-        // TODO: write tests if you have time
-
         use super::DividendWallet;
         use crate::dividend_wallet::Environment;
         use ink::primitives::AccountId;
+
+        #[ink::test]
+        fn constructor_works() {
+            let fund = AccountId::from([0x01; 32]);
+            ink::env::test::set_caller::<Environment>(fund);
+            let contract = DividendWallet::new();
+            assert_eq!(contract.fund(), fund);
+        }
     }
+
+    // TODO: write e2e tests if you have time
 }
 
 #[derive(scale::Encode, scale::Decode)]

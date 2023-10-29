@@ -4,3 +4,6 @@ members = [
     "dividend_wallet",
     "zeit_fund",
 ]
+
+[profile.dev]
+overflow-checks = false
