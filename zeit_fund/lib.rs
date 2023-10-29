@@ -332,8 +332,10 @@ mod zeit_fund {
                 return Err(Error::ManagerSharesAreLocked);
             }
 
-            // Ensure that dividend is claimed by the from
+            // Ensure that dividend is claimed by the from & to
+            // NOTE: this forces the "to" to receive the ZTG
             self.claim_dividend(from.clone())?;
+            self.claim_dividend(to.clone())?;
 
             self.balances.insert(from, &(from_balance - value));
             let to_balance = self.balance_of_impl(to);
@@ -466,7 +468,7 @@ mod zeit_fund {
                 if !res {
                     return Err(Error::DividendDistributionError);
                 }
-                
+
                 self.env().emit_event(DividendClaimed {
                     user: caller,
                     amount: dividend,
