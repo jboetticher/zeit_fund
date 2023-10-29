@@ -11,12 +11,9 @@ Workflow:
     2a. It is recommended that managers also fund, to lock their tokens as a trust mechanism.
         Otherwise, there is nothing stopping the manager from dumping. By locking, their
         liquidity is locked until liquidation of the fund.
-3. Manager can interact with markets.
+3. Manager can interact with markets & issue dividends of ZTG.
 
 
-Zeit Fund should:
-- Give a single account the ability to use a smart contract to buy/redeem shares in ZTG
-- Force the single account to have at least X amount of ZTG to do anything
 
 NOTE:
 No dynamic insert of funds. There is a period where funds are added and afterwards no more.
@@ -35,9 +32,6 @@ mod zeit_fund {
     use ink::storage::Mapping;
     use ink::ToAccountId;
 
-    /// Defines the storage of your contract.
-    /// Add new fields to the below struct in order
-    /// to add new static storage fields to your contract.
     #[ink(storage)]
     pub struct ZeitFund {
         /// Stores a single `bool` value on the storage.
@@ -135,7 +129,6 @@ mod zeit_fund {
                 .endowment(0)
                 .salt_bytes([0xDE, 0xAD, 0xBE, 0xEF])
                 .instantiate();
-            // TODO: edit so that dividend wallet is constructed, not claimed
 
             Self {
                 manager,
