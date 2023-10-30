@@ -730,6 +730,22 @@ pub enum AssetManagerCall {
 #[derive(scale::Encode, scale::Decode)]
 #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
 pub enum SwapsCall {
+    #[codec(index = 1)]
+    PoolExit {
+        #[codec(compact)]
+        pool_id: u128,
+        #[codec(compact)]
+        pool_amount: u128,
+        min_assets_out: Vec<u128>,
+    },
+    #[codec(index = 5)]
+    PoolJoin {
+        #[codec(compact)]
+        pool_id: u128,
+        #[codec(compact)]
+        pool_amount: u128,
+        max_assets_in: Vec<u128>,
+    },
     // https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Fbsr.zeitgeist.pm#/extrinsics/decode/0x380981040402286bee00b102000000000000000000000000000001000100cdbe7b00000000000000000000000000
     #[codec(index = 9)]
     SwapExactAmountIn {
